@@ -2,7 +2,7 @@
   "name": "universal-healthy-food-access-system",
   "version": "1.0.0",
   "private": false,
-  "homepage": "https://sskmusic.github.io/universal-healthy-food-access-system",
+  "homepage": ".",
   "dependencies": {
     "@testing-library/jest-dom": "^5.16.4",
     "@testing-library/react": "^13.3.0",
