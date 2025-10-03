@@ -194,7 +194,7 @@ function Map({ cityData, foodOutlets, loading }) {
   }
 
   return (
-    <div style={{ position: 'relative', height: '100%' }}>
+    <div className="mobile-map" style={{ position: 'relative', height: '100%' }}>
       {/* Map Container */}
       <div 
         ref={mapRef} 

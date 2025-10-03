@@ -51,7 +51,7 @@ function App() {
   return (
     <div className="App">
       {/* Header */}
-      <header style={{
+      <header className="mobile-header" style={{
         backgroundColor: '#2c3e50',
         color: 'white',
         padding: '16px 20px',
@@ -96,14 +96,14 @@ function App() {
       </header>
 
       {/* Main Content */}
-      <div style={{ 
+      <div className="main-content" style={{ 
         display: 'flex', 
         height: 'calc(100vh - 80px)',
         fontFamily: 'system-ui, -apple-system, sans-serif'
       }}>
         
         {/* Left Panel - Controls */}
-        <div style={{
+        <div className="left-panel" style={{
           width: '350px',
           backgroundColor: '#f8f9fa',
           borderRight: '1px solid #dee2e6',
@@ -142,7 +142,7 @@ function App() {
         </div>
 
         {/* Right Panel - Map */}
-        <div style={{ 
+        <div className="right-panel" style={{ 
           flex: 1, 
           position: 'relative',
           backgroundColor: '#f8f9fa'
