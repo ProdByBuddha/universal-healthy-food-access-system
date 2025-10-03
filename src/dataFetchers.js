@@ -301,7 +301,6 @@ export async function fetchNASAPower(lat, lng, startDate, endDate) {
 export async function fetchAllCityData(cityData, options = {}) {
   const {
     includeFoodOutlets = true,
-    includeNASAData = true,
     includePopulation = false, // Requires auth
     includeNDVI = false,       // Requires auth
     includeLST = false,        // Requires auth
@@ -411,7 +410,7 @@ export function validateBBox(bbox) {
 
 // ==================== EXPORT ====================
 
-export default {
+const dataFetchers = {
   geocodeCity,
   fetchCityBoundary,
   fetchFoodOutlets,
@@ -423,3 +422,5 @@ export default {
   calculateBBox,
   validateBBox
 };
+
+export default dataFetchers;
