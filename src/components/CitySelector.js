@@ -81,7 +81,7 @@ function CitySelector({ onCitySelected }) {
   };
 
   return (
-    <div className="mobile-controls" style={{ padding: '20px' }}>
+    <div style={{ padding: '20px' }}>
       <h2 style={{ 
         fontSize: '18px', 
         marginBottom: '16px',
