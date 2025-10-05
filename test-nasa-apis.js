@@ -32,8 +32,8 @@ async function testNASAAPIs() {
   
   const results = await Promise.all([
     testAPI('NASA Population Data', fetchNASAPopulation, bbox),
-    testAPI('NASA NDVI', fetchNASANDVI, bbox, '2024-01-01', '2024-12-31'),
-    testAPI('NASA LST', fetchNASALST, bbox, '2024-06-01', '2024-08-31')
+    testAPI('NASA NDVI', fetchNASANDVI, bbox, '2025-01-01', '2025-12-31'),
+    testAPI('NASA LST', fetchNASALST, bbox, '2025-06-01', '2025-08-31')
   ]);
   
   const success = results.filter(r => r).length;

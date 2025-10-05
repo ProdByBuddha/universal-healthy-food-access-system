@@ -2,6 +2,11 @@
 // Works for any city worldwide
 
 import axios from 'axios';
+import { fetchDemographicData } from './utils/demographicData';
+import { generateIsochrones } from './utils/isochroneGenerator';
+import { assessSoilQuality } from './utils/soilDataIntegration';
+import { demographicCacheHelpers, climateCacheHelpers } from './utils/cacheManager';
+import { logApiStatus } from './config/apiConfig';
 
 // Base APIs
 const OVERPASS_API = 'https://overpass-api.de/api/interpreter';
@@ -13,7 +18,8 @@ const NASA_CMR_API = 'https://cmr.earthdata.nasa.gov/search/granules.json';
 const NASA_SEDAC_API = 'https://sedac.ciesin.columbia.edu/data/set/gpw-v4-population-density-adjusted-to-2015-unwpp-country-totals-rev11/wfs';
 const NASA_POWER_API = 'https://power.larc.nasa.gov/api/temporal/daily/point';
 
-// Create axios instance with SEDAC config
+// Create axios instance with SEDAC config (commented out - not currently used)
+/*
 const sedacAxios = axios.create({
   baseURL: NASA_SEDAC_API,
   timeout: 60000,
@@ -23,6 +29,7 @@ const sedacAxios = axios.create({
     'Client-Id': 'HealthyFoodAccessSystem'
   }
 });
+*/
 
 // Create axios instance with CMR config
 const cmrAxios = axios.create({
@@ -39,8 +46,10 @@ const cmrAxios = axios.create({
 
 /**
  * Geocode city name to coordinates and boundary
+ * @param {string} cityName - Name of city to geocode
+ * @param {AbortSignal} signal - Optional AbortController signal for cancellation
  */
-export async function geocodeCity(cityName) {
+export async function geocodeCity(cityName, signal = null) {
   try {
     const response = await axios.get(`${NOMINATIM_API}/search`, {
       params: {
@@ -51,7 +60,8 @@ export async function geocodeCity(cityName) {
       },
       headers: {
         'User-Agent': 'HealthyFoodAccessSystem/1.0'
-      }
+      },
+      signal // Add abort signal support
     });
 
     if (response.data.length === 0) {
@@ -100,8 +110,10 @@ export async function fetchCityBoundary(osmId, osmType) {
 /**
  * Fetch all food outlets within bounding box
  * Returns classified outlets (healthy vs unhealthy)
+ * @param {Array} bbox - Bounding box [south, north, west, east]
+ * @param {AbortSignal} signal - Optional AbortController signal for cancellation
  */
-export async function fetchFoodOutlets(bbox) {
+export async function fetchFoodOutlets(bbox, signal = null) {
   // bbox format: [south, north, west, east] or [minLat, maxLat, minLng, maxLng]
   const [south, north, west, east] = bbox;
 
@@ -115,14 +127,14 @@ export async function fetchFoodOutlets(bbox) {
       node["amenity"="marketplace"](${south},${west},${north},${east});
       node["shop"="farm"](${south},${west},${north},${east});
       node["shop"="health_food"](${south},${west},${north},${east});
-      
+
       // Secondary healthy outlets
       node["shop"="grocery"](${south},${west},${north},${east});
       node["shop"="convenience"](${south},${west},${north},${east});
       way["shop"="convenience"](${south},${west},${north},${east});
       node["shop"="butcher"](${south},${west},${north},${east});
       node["shop"="fishmonger"](${south},${west},${north},${east});
-      
+
       // Unhealthy (for contrast)
       node["amenity"="fast_food"](${south},${west},${north},${east});
       way["amenity"="fast_food"](${south},${west},${north},${east});
@@ -132,26 +144,36 @@ export async function fetchFoodOutlets(bbox) {
 
   try {
     const response = await axios.post(OVERPASS_API, query, {
-      headers: { 'Content-Type': 'text/plain' }
+      headers: { 'Content-Type': 'text/plain' },
+      signal // Add abort signal support
     });
 
-    const outlets = response.data.elements.map(element => {
+    const allOutlets = response.data.elements.map(element => {
       const lat = element.lat || element.center?.lat;
       const lng = element.lon || element.center?.lon;
-      
+
+      const name = element.tags?.name || 'Unnamed';
       return {
         id: element.id,
-        name: element.tags?.name || 'Unnamed',
+        name,
         lat,
         lng,
-        type: classifyOutlet(element.tags),
+        type: classifyOutlet(element.tags, name),
         rawType: element.tags?.shop || element.tags?.amenity,
         tags: element.tags,
-        classification: getOutletClassification(element.tags)
+        classification: getOutletClassification(element.tags, name)
       };
-    }).filter(outlet => outlet.lat && outlet.lng); // Remove invalid coords
+    });
 
-    return outlets;
+    // Filter out outlets with invalid coordinates
+    const validOutlets = allOutlets.filter(outlet => outlet.lat && outlet.lng);
+    const invalidCount = allOutlets.length - validOutlets.length;
+
+    if (invalidCount > 0) {
+      console.warn(`⚠ Removed ${invalidCount} outlets with invalid coordinates (${allOutlets.length} total → ${validOutlets.length} valid)`);
+    }
+
+    return validOutlets;
   } catch (error) {
     console.error('Food outlets fetch error:', error);
     throw error;
@@ -161,34 +183,94 @@ export async function fetchFoodOutlets(bbox) {
 /**
  * Classify outlet as healthy, mixed, or unhealthy
  */
-function classifyOutlet(tags) {
+/**
+ * Analyze outlet name for health sentiment
+ */
+function analyzeNameSentiment(name) {
+  if (!name || name === 'Unnamed') return 'neutral';
+
+  const nameLower = name.toLowerCase();
+
+  // Strong healthy indicators
+  const healthyKeywords = [
+    'smoothie', 'juice', 'salad', 'organic', 'fresh', 'healthy', 'wellness',
+    'natural', 'whole food', 'vegan', 'vegetarian', 'farmers market',
+    'green', 'harvest', 'garden', 'nutrition', 'vitamin', 'superfood',
+    'acai', 'kale', 'quinoa', 'granola', 'yogurt', 'fruit', 'veggie'
+  ];
+
+  // Unhealthy indicators
+  const unhealthyKeywords = [
+    'burger', 'pizza', 'fried', 'donut', 'candy', 'soda', 'fast food',
+    'wings', 'fries', 'chips', 'ice cream', 'dessert', 'sweets',
+    'liquor', 'bar', 'pub', 'tavern', 'beer', 'wine'
+  ];
+
+  // Check for healthy keywords
+  for (const keyword of healthyKeywords) {
+    if (nameLower.includes(keyword)) {
+      return 'healthy';
+    }
+  }
+
+  // Check for unhealthy keywords
+  for (const keyword of unhealthyKeywords) {
+    if (nameLower.includes(keyword)) {
+      return 'unhealthy';
+    }
+  }
+
+  return 'neutral';
+}
+
+function classifyOutlet(tags, name) {
   const shop = tags?.shop;
   const amenity = tags?.amenity;
 
-  // Healthy primary
+  // Get name sentiment first - this is our primary signal
+  const nameSentiment = analyzeNameSentiment(name);
+
+  // Definitive healthy from tags (supermarkets, farms, etc)
   if (['supermarket', 'greengrocer', 'farm', 'health_food'].includes(shop)) {
     return 'healthy_primary';
   }
   if (amenity === 'marketplace') return 'healthy_primary';
 
-  // Unhealthy
-  if (amenity === 'fast_food') return 'unhealthy';
-  if (shop === 'alcohol') return 'unhealthy';
+  // Strong unhealthy tags that override name sentiment
+  // (but only if name doesn't strongly suggest healthy)
+  const strongUnhealthyTags = amenity === 'fast_food' || shop === 'alcohol';
+  if (strongUnhealthyTags && nameSentiment !== 'healthy') {
+    return 'unhealthy';
+  }
 
+  // NAME SENTIMENT OVERRIDE - prioritize what the business calls itself
+  if (nameSentiment === 'healthy') {
+    // Any place with healthy keywords in name is healthy
+    // (juice bars, smoothie shops, salad places, etc.)
+    return 'healthy_primary';
+  }
+
+  if (nameSentiment === 'unhealthy') {
+    // Any place with unhealthy keywords is unhealthy
+    return 'unhealthy';
+  }
+
+  // If name sentiment is neutral, fall back to tag-based classification
   // Mixed (needs validation)
   if (['grocery', 'convenience', 'butcher', 'fishmonger'].includes(shop)) {
     return 'mixed';
   }
 
+  // Default to unknown if no clear signals
   return 'unknown';
 }
 
 /**
  * Get detailed classification
  */
-function getOutletClassification(tags) {
-  const type = classifyOutlet(tags);
-  
+function getOutletClassification(tags, name) {
+  const type = classifyOutlet(tags, name);
+
   const classifications = {
     healthy_primary: {
       label: 'Healthy Food Source',
@@ -268,29 +350,41 @@ export async function fetchNASAPopulation(bbox) {
       console.log('Large area detected, subdividing requests');
       const subBoxes = subdivideBBox(bbox);
       const subResults = await Promise.all(
-        subBoxes.map(subBox => 
-          axios.get(NASA_SEDAC_API, {
-            params: {
-              service: 'WFS',
-              version: '2.0.0',
-              request: 'GetFeature',
-              typeName: 'gpw-v4:gpw-v4-population-density-adjusted-to-2015-unwpp-country-totals-rev11',
-              outputFormat: 'application/json',
-              bbox: subBox.join(','),
-              srsName: 'EPSG:4326',
-              count: 2,
-              propertyName: 'pop_den_2015,un_adj_2015'
-            },
-            timeout: 30000,
-            headers: {
-              'Authorization': `Bearer ${NASA_EARTHDATA_TOKEN}`,
-              'Accept': 'application/json',
-              'User-Agent': 'HealthyFoodAccessSystem/1.0'
-            },
-            validateStatus: status => status === 200
-          }).catch(err => ({ data: { features: [] }})) // Continue even if sub-request fails
-        )
+        subBoxes.map(async (subBox, index) => {
+          try {
+            const response = await axios.get(NASA_SEDAC_API, {
+              params: {
+                service: 'WFS',
+                version: '2.0.0',
+                request: 'GetFeature',
+                typeName: 'gpw-v4:gpw-v4-population-density-adjusted-to-2015-unwpp-country-totals-rev11',
+                outputFormat: 'application/json',
+                bbox: subBox.join(','),
+                srsName: 'EPSG:4326',
+                count: 2,
+                propertyName: 'pop_den_2015,un_adj_2015'
+              },
+              timeout: 30000,
+              headers: {
+                'Authorization': `Bearer ${NASA_EARTHDATA_TOKEN}`,
+                'Accept': 'application/json',
+                'User-Agent': 'HealthyFoodAccessSystem/1.0'
+              },
+              validateStatus: status => status === 200
+            });
+            return { success: true, data: response.data, index };
+          } catch (err) {
+            console.warn(`⚠ Sub-request ${index + 1}/${subBoxes.length} failed:`, err.message);
+            return { success: false, data: { features: [] }, index };
+          }
+        })
       );
+
+      // Track failures
+      const failedRequests = subResults.filter(r => !r.success);
+      if (failedRequests.length > 0) {
+        console.warn(`⚠ ${failedRequests.length}/${subBoxes.length} subdivision requests failed - partial data only`);
+      }
 
       // Combine results
       const features = subResults.flatMap(r => r.data?.features || []);
@@ -299,7 +393,13 @@ export async function fetchNASAPopulation(bbox) {
         bbox,
         data: features,
         resolution: '1km',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        dataQuality: {
+          totalSubdivisions: subBoxes.length,
+          successfulSubdivisions: subBoxes.length - failedRequests.length,
+          failedSubdivisions: failedRequests.length,
+          completeness: (subBoxes.length - failedRequests.length) / subBoxes.length
+        }
       };
 
       // Cache the result
@@ -439,12 +539,31 @@ export async function fetchNASAPower(lat, lng, startDate, endDate) {
 
     const parameters = response.data.properties.parameter;
     
-    // Helper function to calculate mean safely
+    // Helper function to calculate mean safely, filtering NASA fill values (-999)
     const calculateMean = (data) => {
-      if (!data) return 0;
-      const values = Object.values(data);
-      return values.length > 0 ? values.reduce((sum, val) => sum + (val || 0), 0) / values.length : 0;
+      if (!data) return null;
+      // Filter out fill values: -999 (NASA POWER fill value), null, undefined
+      const values = Object.values(data).filter(v => v !== null && v !== undefined && v !== -999);
+      if (values.length === 0) return null;
+      return values.reduce((sum, val) => sum + val, 0) / values.length;
     };
+
+    // Calculate data quality metrics
+    const getDataQuality = (data) => {
+      if (!data) return { total: 0, valid: 0, fillValues: 0, completeness: 0 };
+      const allValues = Object.values(data);
+      const validValues = allValues.filter(v => v !== null && v !== undefined && v !== -999);
+      return {
+        total: allValues.length,
+        valid: validValues.length,
+        fillValues: allValues.length - validValues.length,
+        completeness: allValues.length > 0 ? (validValues.length / allValues.length) : 0
+      };
+    };
+
+    const solarQuality = getDataQuality(parameters.ALLSKY_SFC_SW_DWN);
+    const tempQuality = getDataQuality(parameters.T2M);
+    const precipQuality = getDataQuality(parameters.PRECTOTCORR);
 
     return {
       source: 'NASA_POWER',
@@ -452,15 +571,18 @@ export async function fetchNASAPower(lat, lng, startDate, endDate) {
       data: {
         ALLSKY_SFC_SW_DWN: {
           mean: calculateMean(parameters.ALLSKY_SFC_SW_DWN),
-          values: parameters.ALLSKY_SFC_SW_DWN || {}
+          values: parameters.ALLSKY_SFC_SW_DWN || {},
+          quality: solarQuality
         },
         T2M: {
           mean: calculateMean(parameters.T2M),
-          values: parameters.T2M || {}
+          values: parameters.T2M || {},
+          quality: tempQuality
         },
         PRECTOTCORR: {
           mean: calculateMean(parameters.PRECTOTCORR),
-          values: parameters.PRECTOTCORR || {}
+          values: parameters.PRECTOTCORR || {},
+          quality: precipQuality
         }
       },
       units: {
@@ -471,6 +593,11 @@ export async function fetchNASAPower(lat, lng, startDate, endDate) {
       dateRange: {
         start: startDate,
         end: endDate
+      },
+      dataQuality: {
+        averageCompleteness: (solarQuality.completeness + tempQuality.completeness + precipQuality.completeness) / 3,
+        totalFillValues: solarQuality.fillValues + tempQuality.fillValues + precipQuality.fillValues,
+        totalDataPoints: solarQuality.total + tempQuality.total + precipQuality.total
       }
     };
   } catch (error) {
@@ -488,26 +615,48 @@ export async function fetchNASAPower(lat, lng, startDate, endDate) {
 export async function fetchAllCityData(cityData, options = {}) {
   const {
     includeFoodOutlets = true,
-    includePopulation = false, // Requires auth
-    includeNDVI = false,       // Requires auth
-    includeLST = false,        // Requires auth
-    includePower = true        // No auth required
+    includePopulation = false,  // Requires auth
+    includeNDVI = false,        // Requires auth
+    includeLST = false,         // Requires auth
+    includePower = true,        // No auth required
+    includeDemographics = true, // New: Census/OSM demographics
+    includeIsochrones = false,  // New: Accessibility analysis (can be slow)
+    includeSoilData = false     // New: Soil quality (for placement engine)
   } = options;
 
   console.log(`Fetching data for ${cityData.name}...`);
 
+  // Log API configuration status once
+  logApiStatus();
+
   const results = {
     city: cityData,
     timestamp: new Date().toISOString(),
-    data: {}
+    data: {},
+    warnings: [],
+    errors: []
   };
 
   try {
+    // Parallelize independent data fetching operations for better performance
+    const parallelFetches = [];
+
     // Always fetch food outlets
     if (includeFoodOutlets) {
       console.log('Fetching food outlets from OpenStreetMap...');
-      results.data.foodOutlets = await fetchFoodOutlets(cityData.boundingBox);
-      console.log(`✓ Found ${results.data.foodOutlets.length} food outlets`);
+      parallelFetches.push(
+        fetchFoodOutlets(cityData.boundingBox)
+          .then(outlets => {
+            results.data.foodOutlets = outlets;
+            console.log(`✓ Found ${outlets.length} food outlets`);
+            return { success: true, type: 'foodOutlets' };
+          })
+          .catch(error => {
+            console.error(`❌ Food outlets fetch failed: ${error.message}`);
+            results.errors.push(`Food outlets fetch failed: ${error.message}`);
+            return { success: false, type: 'foodOutlets', error };
+          })
+      );
     }
 
     // NASA Power data (no auth needed)
@@ -516,33 +665,145 @@ export async function fetchAllCityData(cityData, options = {}) {
       const today = new Date();
       const lastYear = new Date(today);
       lastYear.setFullYear(today.getFullYear() - 1);
-      
-      try {
-        results.data.power = await fetchNASAPower(
+
+      parallelFetches.push(
+        fetchNASAPower(
           cityData.lat,
           cityData.lng,
           lastYear.toISOString().split('T')[0],
           today.toISOString().split('T')[0]
-        );
-        console.log('✓ NASA POWER data retrieved');
-      } catch (error) {
-        console.warn('⚠ NASA POWER fetch failed, continuing without it');
-        results.data.power = null;
-      }
+        )
+          .then(power => {
+            results.data.power = power;
+            const dataQuality = power.dataQuality;
+
+            if (dataQuality.averageCompleteness < 0.5) {
+              const warning = `NASA POWER data quality low (${(dataQuality.averageCompleteness * 100).toFixed(0)}% complete - ${dataQuality.totalFillValues} fill values)`;
+              console.warn(`⚠ ${warning}`);
+              results.warnings.push(warning);
+            }
+
+            console.log(`✓ NASA POWER data retrieved (${(dataQuality.averageCompleteness * 100).toFixed(0)}% data completeness)`);
+            return { success: true, type: 'power' };
+          })
+          .catch(error => {
+            const errorMsg = `NASA POWER fetch failed: ${error.message}`;
+            console.error(`❌ ${errorMsg}`);
+            results.data.power = null;
+            results.errors.push(errorMsg);
+            return { success: false, type: 'power', error };
+          })
+      );
     }
+
+    // Wait for all parallel fetches to complete
+    await Promise.allSettled(parallelFetches);
 
     // Optional NASA data (requires authentication)
     if (includePopulation) {
-      results.data.population = await fetchNASAPopulation(cityData.boundingBox);
+      try {
+        results.data.population = await fetchNASAPopulation(cityData.boundingBox);
+      } catch (error) {
+        const errorMsg = `NASA Population data fetch failed: ${error.message}`;
+        console.error(`❌ ${errorMsg}`);
+        results.errors.push(errorMsg);
+      }
     }
     if (includeNDVI) {
-      results.data.ndvi = await fetchNASANDVI(cityData.boundingBox, '2024-01-01', '2024-12-31');
+      try {
+        results.data.ndvi = await fetchNASANDVI(cityData.boundingBox, '2025-01-01', '2025-12-31');
+      } catch (error) {
+        const errorMsg = `NASA NDVI fetch failed: ${error.message}`;
+        console.error(`❌ ${errorMsg}`);
+        results.errors.push(errorMsg);
+      }
     }
     if (includeLST) {
-      results.data.lst = await fetchNASALST(cityData.boundingBox, '2024-06-01', '2024-08-31');
+      try {
+        results.data.lst = await fetchNASALST(cityData.boundingBox, '2025-06-01', '2025-08-31');
+      } catch (error) {
+        const errorMsg = `NASA LST fetch failed: ${error.message}`;
+        console.error(`❌ ${errorMsg}`);
+        results.errors.push(errorMsg);
+      }
     }
 
-    console.log('✓ All data fetched successfully');
+    // New: Demographics data
+    if (includeDemographics) {
+      console.log('Fetching demographic data...');
+      try {
+        const cacheKey = demographicCacheHelpers.generateKey(cityData.name);
+        let demographics = demographicCacheHelpers.get(cacheKey);
+
+        if (!demographics) {
+          demographics = await fetchDemographicData(cityData, {
+            includeDetailed: true,
+            gridResolution: 0.01
+          });
+          demographicCacheHelpers.set(cityData.name, demographics);
+        } else {
+          console.log('💾 Using cached demographic data');
+        }
+
+        results.data.demographics = demographics;
+        console.log(`✓ Demographic data retrieved (${demographics.source})`);
+      } catch (error) {
+        const errorMsg = `Demographics fetch failed: ${error.message}`;
+        console.error(`❌ ${errorMsg}`);
+        results.errors.push(errorMsg);
+      }
+    }
+
+    // New: Isochrone generation (accessibility analysis)
+    if (includeIsochrones && results.data.foodOutlets) {
+      console.log('Generating isochrones for food outlets...');
+      try {
+        // Limit to top 20 outlets to avoid excessive API calls
+        const topOutlets = results.data.foodOutlets
+          .filter(o => o.classification === 'healthy_primary')
+          .slice(0, 20);
+
+        const isochrones = await generateIsochrones(topOutlets, {
+          profile: 'foot-walking',
+          intervals: [300, 600, 900] // 5, 10, 15 minutes
+        });
+
+        results.data.isochrones = isochrones;
+        console.log(`✓ Generated ${isochrones.isochrones.length} isochrones`);
+      } catch (error) {
+        const errorMsg = `Isochrone generation failed: ${error.message}`;
+        console.warn(`⚠️ ${errorMsg}`);
+        results.warnings.push(errorMsg);
+      }
+    }
+
+    // New: Soil quality assessment (for specific locations)
+    if (includeSoilData) {
+      console.log('Assessing soil quality at city center...');
+      try {
+        const soilAssessment = await assessSoilQuality({
+          lat: cityData.lat,
+          lng: cityData.lng
+        }, 1000);
+
+        results.data.soil = soilAssessment;
+        console.log(`✓ Soil quality: ${soilAssessment.suitability.category}`);
+      } catch (error) {
+        const errorMsg = `Soil assessment failed: ${error.message}`;
+        console.warn(`⚠️ ${errorMsg}`);
+        results.warnings.push(errorMsg);
+      }
+    }
+
+    // Conditional success message based on warnings and errors
+    if (results.errors.length > 0) {
+      console.log(`⚠ Data fetched with ${results.errors.length} error(s) and ${results.warnings.length} warning(s)`);
+    } else if (results.warnings.length > 0) {
+      console.log(`⚠ Data fetched successfully with ${results.warnings.length} warning(s)`);
+    } else {
+      console.log('✓ All data fetched successfully');
+    }
+
     return results;
 
   } catch (error) {

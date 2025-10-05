@@ -1,28 +1,61 @@
 // App.js - Main Application Component
 // Integrates City Selector, Data Fetcher, Map, and Metrics Panel
 
-import React, { useState } from 'react';
+import React, { useState, useCallback, useMemo, lazy, Suspense, useTransition } from 'react';
 import CitySelector from './components/CitySelector';
-import Map from './components/Map';
-import MetricsPanel from './components/MetricsPanel';
 import { fetchAllCityData } from './dataFetchers';
 import './App.css';
+
+// Lazy load heavy components for better initial load performance
+const Map = lazy(() => import('./components/Map'));
+const MetricsPanel = lazy(() => import('./components/MetricsPanel'));
+const OptimalPlacementPanel = lazy(() => import('./components/OptimalPlacementPanel'));
+
+// Loading fallback component for lazy-loaded components
+function ComponentLoader({ label, fullScreen = false }) {
+  return (
+    <div style={{
+      height: fullScreen ? '100%' : '200px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: fullScreen ? '#f8f9fa' : 'transparent'
+    }}>
+      <div style={{ textAlign: 'center' }}>
+        <div style={{
+          width: '30px',
+          height: '30px',
+          border: '3px solid #f3f4f6',
+          borderTop: '3px solid #007bff',
+          borderRadius: '50%',
+          animation: 'spin 1s linear infinite',
+          margin: '0 auto 12px'
+        }}></div>
+        <div style={{ fontSize: '13px', color: '#6c757d' }}>
+          Loading {label}...
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function App() {
   const [selectedCity, setSelectedCity] = useState(null);
   const [cityData, setCityData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [optimalPlacements, setOptimalPlacements] = useState(null);
+  const [isPending, startTransition] = useTransition();
 
-  // Handle city selection from CitySelector
-  async function handleCitySelected(cityInfo) {
+  // Handle city selection from CitySelector (memoized with async transition)
+  const handleCitySelected = useCallback(async (cityInfo) => {
     setSelectedCity(cityInfo);
     setLoading(true);
     setError(null);
 
     try {
       console.log('Fetching data for:', cityInfo.name);
-      
+
       // Fetch all data for the selected city
       const data = await fetchAllCityData(cityInfo, {
         includeFoodOutlets: true,
@@ -30,23 +63,38 @@ function App() {
         includeNASAData: false // Set to true when you have NASA auth
       });
 
-      setCityData(data);
-      setLoading(false);
-      
+      // Use transition for non-blocking UI updates
+      startTransition(() => {
+        setCityData(data);
+        setLoading(false);
+      });
+
       console.log('Data loaded successfully:', data);
     } catch (err) {
       console.error('Error fetching city data:', err);
       setError(err.message);
       setLoading(false);
     }
-  }
+  }, [startTransition]);
 
-  // Reset to initial state
-  function handleReset() {
+  // Handle optimal placement results (memoized)
+  const handlePlacementsFound = useCallback((placements) => {
+    setOptimalPlacements(placements);
+    console.log('Optimal placements received:', placements);
+  }, []);
+
+  // Reset to initial state (memoized)
+  const handleReset = useCallback(() => {
+    // Clear city data to free memory
     setSelectedCity(null);
     setCityData(null);
+    setOptimalPlacements(null);
     setError(null);
-  }
+  }, []);
+
+  // Memoize derived data to avoid recalculations
+  const foodOutletsData = useMemo(() => cityData?.data?.foodOutlets, [cityData]);
+  const nasaPowerData = useMemo(() => cityData?.data?.power, [cityData]);
 
   return (
     <div className="App">
@@ -132,26 +180,43 @@ function App() {
           )}
 
           {/* Metrics Panel */}
-          <div style={{ flex: '1 1 auto', padding: '0 20px 20px 20px' }}>
-            <MetricsPanel 
-              cityData={selectedCity}
-              foodOutlets={cityData?.data?.foodOutlets}
-              nasaPowerData={cityData?.data?.power}
-            />
+          <div style={{ flex: '0 1 auto', padding: '0 20px 20px 20px' }}>
+            <Suspense fallback={<ComponentLoader label="Metrics Panel" />}>
+              <MetricsPanel
+                cityData={selectedCity}
+                foodOutlets={foodOutletsData}
+                nasaPowerData={nasaPowerData}
+              />
+            </Suspense>
+          </div>
+
+          {/* Optimal Placement Panel */}
+          <div style={{ flex: '0 1 auto', padding: '0 20px 20px 20px' }}>
+            <Suspense fallback={<ComponentLoader label="Placement Panel" />}>
+              <OptimalPlacementPanel
+                cityData={selectedCity}
+                foodOutlets={foodOutletsData}
+                climateData={nasaPowerData}
+                onPlacementsFound={handlePlacementsFound}
+              />
+            </Suspense>
           </div>
         </div>
 
         {/* Right Panel - Map */}
-        <div className="right-panel" style={{ 
-          flex: 1, 
+        <div className="right-panel" style={{
+          flex: 1,
           position: 'relative',
           backgroundColor: '#f8f9fa'
         }}>
-          <Map 
-            cityData={selectedCity}
-            foodOutlets={cityData?.data?.foodOutlets}
-            loading={loading}
-          />
+          <Suspense fallback={<ComponentLoader label="Map" fullScreen />}>
+            <Map
+              cityData={selectedCity}
+              foodOutlets={foodOutletsData}
+              optimalPlacements={optimalPlacements}
+              loading={loading || isPending}
+            />
+          </Suspense>
         </div>
       </div>
 
@@ -169,7 +234,7 @@ function App() {
             Data sources: OpenStreetMap (Nominatim, Overpass) • NASA POWER API
           </div>
           <div>
-            Built for NASA Space Apps Challenge 2024
+            Built for NASA Space Apps Challenge 2025
           </div>
         </div>
       </footer>
