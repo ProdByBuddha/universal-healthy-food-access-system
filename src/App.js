@@ -5,6 +5,7 @@ import React, { useState, useCallback, useMemo, lazy, Suspense, useTransition } 
 import CitySelector from './components/CitySelector';
 import { fetchAllCityData } from './dataFetchers';
 import './App.css';
+import { generateAiSolutionPlan } from './utils/aiSolutionService';
 
 // Lazy load heavy components for better initial load performance
 const Map = lazy(() => import('./components/Map'));
@@ -45,11 +46,17 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [optimalPlacements, setOptimalPlacements] = useState(null);
+  const [aiPlan, setAiPlan] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState(null);
   const [isPending, startTransition] = useTransition();
 
   // Handle city selection from CitySelector (memoized with async transition)
   const handleCitySelected = useCallback(async (cityInfo) => {
     setSelectedCity(cityInfo);
+    setOptimalPlacements(null);
+    setAiPlan(null);
+    setAiError(null);
     setLoading(true);
     setError(null);
 
@@ -77,11 +84,41 @@ function App() {
     }
   }, [startTransition]);
 
+  // Memoize derived data to avoid recalculations
+  const foodOutletsData = useMemo(() => cityData?.data?.foodOutlets, [cityData]);
+  const nasaPowerData = useMemo(() => cityData?.data?.power, [cityData]);
+
   // Handle optimal placement results (memoized)
   const handlePlacementsFound = useCallback((placements) => {
     setOptimalPlacements(placements);
     console.log('Optimal placements received:', placements);
   }, []);
+
+  const handleGenerateAiPlan = useCallback(async () => {
+    if (!selectedCity) {
+      setAiError('Select a city before generating an AI plan.');
+      return;
+    }
+
+    setAiLoading(true);
+    setAiError(null);
+
+    try {
+      const plan = await generateAiSolutionPlan({
+        city: selectedCity,
+        placements: optimalPlacements?.placements || [],
+        climate: nasaPowerData,
+        foodOutlets: foodOutletsData || []
+      });
+
+      setAiPlan(plan);
+    } catch (err) {
+      console.error('AI solution generation failed:', err);
+      setAiError(err.message || 'AI solution generation failed');
+    } finally {
+      setAiLoading(false);
+    }
+  }, [selectedCity, optimalPlacements, nasaPowerData, foodOutletsData]);
 
   // Reset to initial state (memoized)
   const handleReset = useCallback(() => {
@@ -90,11 +127,9 @@ function App() {
     setCityData(null);
     setOptimalPlacements(null);
     setError(null);
+    setAiPlan(null);
+    setAiError(null);
   }, []);
-
-  // Memoize derived data to avoid recalculations
-  const foodOutletsData = useMemo(() => cityData?.data?.foodOutlets, [cityData]);
-  const nasaPowerData = useMemo(() => cityData?.data?.power, [cityData]);
 
   return (
     <div className="App">
@@ -186,6 +221,10 @@ function App() {
                 cityData={selectedCity}
                 foodOutlets={foodOutletsData}
                 nasaPowerData={nasaPowerData}
+                aiPlan={aiPlan}
+                aiLoading={aiLoading}
+                aiError={aiError}
+                onGenerateAiPlan={handleGenerateAiPlan}
               />
             </Suspense>
           </div>
@@ -214,6 +253,7 @@ function App() {
               cityData={selectedCity}
               foodOutlets={foodOutletsData}
               optimalPlacements={optimalPlacements}
+              aiSolutions={aiPlan}
               loading={loading || isPending}
             />
           </Suspense>

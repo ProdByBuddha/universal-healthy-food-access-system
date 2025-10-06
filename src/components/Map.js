@@ -1,3 +1,4 @@
+/* global globalThis */
 // Map.js - Interactive Map Component with Layer Control
 // Displays food outlets with classification markers organized in toggleable layers
 // Implements progressive loading for large datasets
@@ -51,7 +52,13 @@ const createCustomIcon = (color) => {
 };
 
 function Map(props = {}) {
-  const { cityData = null, foodOutlets = [], optimalPlacements = [], loading = false } = props;
+  const {
+    cityData = null,
+    foodOutlets = [],
+    optimalPlacements = [],
+    aiSolutions = null,
+    loading = false
+  } = props;
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const layerGroupsRef = useRef({});
@@ -82,7 +89,8 @@ function Map(props = {}) {
     heatmap_mixed: false,
     heatmap_unhealthy: false,
     heatmap_unknown: false,
-    heatmap_intervention: false
+    heatmap_intervention: false,
+    ai_recommendations: true
   });
 
   // Initialize map
@@ -114,6 +122,7 @@ function Map(props = {}) {
       FOOD_HUB: L.layerGroup().addTo(mapInstanceRef.current),
       COMMUNITY_KITCHEN: L.layerGroup().addTo(mapInstanceRef.current),
       FOOD_PANTRY: L.layerGroup().addTo(mapInstanceRef.current),
+      ai_recommendations: L.layerGroup().addTo(mapInstanceRef.current),
       cityCenter: L.layerGroup().addTo(mapInstanceRef.current)
     };
 
@@ -508,6 +517,88 @@ function Map(props = {}) {
       });
     };
   }, [optimalPlacements, getPriorityColor, getServiceRadius]);
+
+  // Render AI solution markers
+  useEffect(() => {
+    if (!mapInstanceRef.current || !layerGroupsRef.current.ai_recommendations) return;
+
+    const layer = layerGroupsRef.current.ai_recommendations;
+    layer.eachLayer(l => {
+      l.off();
+      if (l.getPopup()) {
+        l.getPopup().remove();
+      }
+    });
+    layer.clearLayers();
+
+    if (!aiSolutions?.recommendations || aiSolutions.recommendations.length === 0) {
+      return;
+    }
+
+    aiSolutions.recommendations.forEach((rec, index) => {
+      const { location = {}, mapLabel, priority, rationale, expectedImpact } = rec;
+      if (!location.lat || !location.lng) {
+        return;
+      }
+
+      const icon = L.divIcon({
+        className: 'ai-recommendation-icon',
+        html: `<div style="
+          background: linear-gradient(135deg, #0ea5e9, #6366f1);
+          width: 24px;
+          height: 24px;
+          border-radius: 50%;
+          border: 3px solid white;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 4px 12px rgba(14,165,233,0.45);
+          font-size: 14px;
+          color: white;
+          font-weight: 700;
+        ">AI</div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+
+      const marker = L.marker([location.lat, location.lng], { icon });
+
+      const populationDisplay = typeof expectedImpact?.population === 'number'
+        ? expectedImpact.population.toLocaleString()
+        : expectedImpact?.population || null;
+
+      const popup = `
+        <div style="min-width: 240px;">
+          <h4 style="margin: 0 0 6px; font-size: 14px; color: #0e7490;">
+            🤖 ${rec.title || `AI Recommendation ${index + 1}`}
+          </h4>
+          ${priority ? `<div style="margin-bottom: 6px; font-size: 12px;"><strong>Priority:</strong> <span style="color: ${getPriorityColor(priority)};">${priority}</span></div>` : ''}
+          ${mapLabel ? `<div style="margin-bottom: 6px; font-size: 12px;">${mapLabel}</div>` : ''}
+          ${rationale ? `<div style="margin-bottom: 6px; font-size: 12px; color: #475569;">${rationale}</div>` : ''}
+          ${expectedImpact ? `<div style="font-size: 12px; color: #1f2937;">
+            <strong>Impact:</strong>
+            <ul style="padding-left: 18px; margin: 4px 0;">
+              ${populationDisplay ? `<li>Population reach: ${populationDisplay}</li>` : ''}
+              ${expectedImpact.equityLift ? `<li>Equity lift: ${expectedImpact.equityLift}</li>` : ''}
+              ${expectedImpact.timeframe ? `<li>Timeframe: ${expectedImpact.timeframe}</li>` : ''}
+            </ul>
+          </div>` : ''}
+        </div>
+      `;
+
+      marker.bindPopup(popup);
+      layer.addLayer(marker);
+    });
+  
+    return () => {
+      layer.eachLayer(l => {
+        l.off();
+        if (l.getPopup()) {
+          l.getPopup().remove();
+        }
+      });
+    };
+  }, [aiSolutions, getPriorityColor]);
 
   // Handle layer visibility changes
   useEffect(() => {

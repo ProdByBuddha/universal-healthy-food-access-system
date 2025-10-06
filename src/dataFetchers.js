@@ -58,9 +58,6 @@ export async function geocodeCity(cityName, signal = null) {
         limit: 1,
         polygon_geojson: 1
       },
-      headers: {
-        'User-Agent': 'HealthyFoodAccessSystem/1.0'
-      },
       signal // Add abort signal support
     });
 
